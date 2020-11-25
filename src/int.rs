@@ -308,16 +308,16 @@ impl Int {
     unsafe { String::from_utf8_unchecked(buf) }
   }
 
-  pub fn to_str_radix_len(&self, base: u8, upper: bool, len: u32) -> String {
-    if self.size == 0 {
-      return "0".to_string();
-    }
-
+  pub fn to_str_radix_len(&self, base: u8, upper: bool, len: usize) -> String {
     if base < 2 || base > 36 {
       panic!("Invalid base: {}", base);
     }
 
-    let mut num_digits = len as usize;
+    if self.size == 0 {
+      return "0".repeat(len).to_string();
+    }
+
+    let mut num_digits = len;
 
     if self.sign() == -1 {
       num_digits += 1;
@@ -337,14 +337,13 @@ impl Int {
     let mut cur = Cursor::new(w);
 
     unsafe {
-      ll::base::to_base_le(
-        256 as u32,
+      ll::base::to_bytes_le(
         self.limbs(),
         self.abs_size(),
         |b| {
           cur.write_all(&[b]).unwrap();
         },
-        len
+        Some(len)
       );
     }
 
@@ -356,7 +355,7 @@ impl Int {
     w: &mut W,
     base: u8,
     upper: bool,
-    len: u32
+    len: usize
   ) -> io::Result<()> {
     debug_assert!(self.well_formed());
 
@@ -387,7 +386,7 @@ impl Int {
   }
 
   pub fn num_digits(&self, base: u32) -> usize {
-    unsafe { ll::base::num_digits(self.limbs(), self.abs_size(), base as u32) }
+    unsafe { ll::base::num_base_digits(self.limbs(), self.abs_size(), base as u32) }
   }
 
   /// Similar to `to_str_radix`, writing to something that implements `io::Write` instead.

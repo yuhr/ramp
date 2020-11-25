@@ -16,6 +16,7 @@
 #![crate_name = "ramp"]
 #![feature(core_intrinsics, asm, allocator_api)]
 #![feature(step_trait, step_trait_ext, ptr_internals, raw_vec_internals)]
+#![feature(label_break_value)]
 #![cfg_attr(test, feature(test))]
 
 #[cfg(test)]

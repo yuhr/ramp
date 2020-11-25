@@ -3,7 +3,7 @@
 //    Licensed under the Apache License, Version 2.0 (the "License");
 //    you may not use this file except in compliance with the License.
 //    You may obtain a copy of the License at
-//
+//#![feature(label_break_value)]
 //        http://www.apache.org/licenses/LICENSE-2.0
 //
 //    Unless required by applicable law or agreed to in writing, software
@@ -110,7 +110,7 @@ pub unsafe fn to_base<F: FnMut(u8)>(
   np: Limbs,
   nn: i32,
   mut out_byte: F,
-  len: Option<u32>
+  len: Option<usize>
 ) {
   debug_assert!(nn >= 0);
   debug_assert!(base < BASES.len() as u32);
@@ -198,179 +198,54 @@ pub unsafe fn to_base<F: FnMut(u8)>(
     return;
   }
   // TODO: Use divide-and-conquer for large numbers
-  to_base_impl(0, base, np, nn, out_byte);
+  to_base_impl(len, base, np, nn, out_byte);
 }
 
-pub unsafe fn to_base_le<F: FnMut(u8)>(
-  base: u32,
-  np: Limbs,
-  nn: i32,
-  mut out_byte: F,
-  min_len: usize
-) {
-  debug_assert!(nn >= 0);
-  debug_assert!(base < BASES.len() as u32);
-  debug_assert!(base >= 2);
-  assume(base < BASES.len() as u32);
-  assume(base >= 2);
+pub unsafe fn to_bytes_le<F: FnMut(u8)>(np: Limbs, nn: i32, mut out_byte: F, len: Option<usize>) {
+  let bits_per_digit = BASES.get_unchecked(256).big_base.0 as usize;
+  let mut n1 = *np.offset(0isize);
+  let mut bit_pos = 0usize;
+  let mut i = 0;
+  let mut count = 0;
 
-  if nn <= 0 {
-    out_byte(0);
-    return;
-  }
+  let mask_one_digit = (Limb(1) << bits_per_digit) - 1;
 
-  // Fast path for powers-of-two, since each limb is already in base B^m format
-  if base.is_power_of_two() {
-    let bits_per_digit = BASES.get_unchecked(base as usize).big_base.0 as usize;
-    assume(bits_per_digit > 0);
-    let mut n1 = *np.offset(0isize);
-    let mut bit_pos = 0usize;
-    let mut i = 0;
-
-    let mask_one_digit = (Limb(1) << bits_per_digit) - 1;
-
-    // Convert each limb by shifting and masking to get the value for each output digit
-    loop {
-      while bit_pos < Limb::BITS {
-        let b = ((n1 >> (bit_pos as usize)) & mask_one_digit).0 as u8;
-        out_byte(b);
-        bit_pos += bits_per_digit;
+  // Convert each limb by shifting and masking to get the value for each output digit
+  loop {
+    while bit_pos < Limb::BITS {
+      let b = ((n1 >> (bit_pos as usize)) & mask_one_digit).0 as u8;
+      out_byte(b);
+      count += 1;
+      if let Some(len) = len {
+        if count == len {
+          return;
+        }
       }
-      i += 1;
-      if nn <= i {
-        break;
-      }
-      n1 = *np.offset(i as isize);
-      bit_pos = 0usize;
+      bit_pos += bits_per_digit;
     }
-    let len = Limb::BITS * (nn as usize) / 8usize;
-    let mut min_len = min_len;
-    while len < min_len {
+    i += 1;
+    if nn <= i {
+      break;
+    }
+    n1 = *np.offset(i as isize);
+    bit_pos = 0usize;
+  }
+  if let Some(len) = len {
+    while count < len {
       out_byte(0);
-      min_len -= 1;
+      count += 1;
     }
-    return;
-  }
-}
-
-pub unsafe fn num_digits(np: Limbs, nn: i32, base: u32) -> usize {
-  debug_assert!(nn >= 0);
-  debug_assert!(base < BASES.len() as u32);
-  debug_assert!(base >= 2);
-  assume(base < BASES.len() as u32);
-  assume(base >= 2);
-
-  if nn <= 0 {
-    return 0;
-  }
-
-  num_digits_impl(0, base, np, nn);
-}
-
-unsafe fn num_digits_impl(mut len: u32, base: u32, np: Limbs, mut nn: i32) {
-  debug_assert!(base > 2);
-
-  let buf_len = num_base_digits(np, nn, base);
-  let mut buf: Vec<u8> = vec![0; buf_len];
-  let mut r: Vec<Limb> = vec![Limb(0); (nn + 1) as usize];
-  let rp = LimbsMut::new(&mut r[0], 0, r.len() as i32);
-
-  ll::copy_incr(np, rp.offset(1), nn);
-
-  let mut sz = 0;
-
-  let s: *mut u8 = &mut buf[0];
-  let mut s = s.offset(buf_len as isize);
-
-  let base = Limb(base as ll::limb::BaseInt);
-
-  macro_rules! base_impl (
-    ($base:expr, $s:expr, $rp:expr, $sz:ident, $nn:ident) => (
-      {
-        let digits_per_limb = BASES.get_unchecked($base.0 as usize).digits_per_limb;
-        let big_base = BASES.get_unchecked($base.0 as usize).big_base;
-
-        // Process limbs from least-significant to most, until there is only one
-        // limb left
-        while $nn > 1 {
-          // Divide rp by the big_base, with a single fractional limb produced.
-          // The fractional limb is approximately 1/remainder
-          ll::divrem_1($rp, 1, $rp.offset(1).as_const(), $nn, big_base);
-
-          $nn -= if *$rp.offset($nn as isize) == 0 { 1 } else { 0 };
-          let mut frac = *$rp + 1;
-          // The loop below produces digits from most-significant to least, but
-          // the containing loop works from least signficant limb up, so move
-          // the first position for the output for this limb. Since we know
-          // there is at least one more limb to process after this one, it's
-          // safe to output all digits that may be produced.
-          $s = $s.offset(-(digits_per_limb as isize));
-          let mut i = digits_per_limb;
-          loop {
-            // Multiply the fraction from divrem by the base, the overflow
-            // amount is the next digit we want
-            let (digit, f) = frac.mul_hilo($base);
-            frac = f;
-            *$s = digit.0 as u8;
-            $s = $s.offset(1);
-
-            $sz += 1;
-
-            i -= 1;
-            if i == 0 { break; }
-          }
-
-          $s = $s.offset(-(digits_per_limb as isize));
-        }
-
-        // Last limb, use normal conversion for this one so we
-        // don't overshoot the number of digits
-        let mut ul = *$rp.offset(1);
-        while ul != 0 {
-          let (q, r) = div_unnorm(ul, base);
-          $s = $s.offset(-1);
-          *$s = r.0 as u8;
-          ul = q;
-
-          $sz += 1;
-        }
-      }
-    )
-  );
-
-  // Specialise on the base-10 conversion routine. The other common base, 16, is handled
-  // by the power-of-two case in to_base. This allows the compiler to unroll the inner
-  // loop in the conversion, which is a sigificant speed increase.
-  if base == 10 {
-    base_impl!(Limb(10), s, rp, sz, nn);
-  } else {
-    base_impl!(base, s, rp, sz, nn);
-  }
-
-  let mut l = sz;
-
-  // Output any leading zeros we may want
-  while l < len {
-    out_byte(0);
-    len -= 1;
-  }
-
-  // Copy the temporary buffer into the output string
-  while l != 0 {
-    out_byte(*s);
-    s = s.offset(1);
-    l -= 1;
   }
 }
 
 unsafe fn to_base_impl<F: FnMut(u8)>(
-  mut len: u32,
+  len: Option<usize>,
   base: u32,
   np: Limbs,
   mut nn: i32,
   mut out_byte: F
 ) {
-  debug_assert!(base > 2);
+  debug_assert!(2 < base);
 
   let buf_len = num_base_digits(np, nn, base);
   let mut buf: Vec<u8> = vec![0; buf_len];
@@ -386,82 +261,82 @@ unsafe fn to_base_impl<F: FnMut(u8)>(
 
   let base = Limb(base as ll::limb::BaseInt);
 
-  macro_rules! base_impl (
-    ($base:expr, $s:expr, $rp:expr, $sz:ident, $nn:ident) => (
-      {
-        let digits_per_limb = BASES.get_unchecked($base.0 as usize).digits_per_limb;
-        let big_base = BASES.get_unchecked($base.0 as usize).big_base;
+  'outer: {
+    let Base {
+      digits_per_limb,
+      big_base
+    } = BASES.get_unchecked(base.0 as usize);
 
-        // Process limbs from least-significant to most, until there is only one
-        // limb left
-        while $nn > 1 {
-          // Divide rp by the big_base, with a single fractional limb produced.
-          // The fractional limb is approximately 1/remainder
-          ll::divrem_1($rp, 1, $rp.offset(1).as_const(), $nn, big_base);
+    // Process limbs from least-significant to most, until there is only one
+    // limb left
+    while 1 < nn {
+      // Divide rp by the big_base, with a single fractional limb produced.
+      // The fractional limb is approximately 1/remainder
+      ll::divrem_1(rp, 1, rp.offset(1).as_const(), nn, *big_base);
 
-          $nn -= if *$rp.offset($nn as isize) == 0 { 1 } else { 0 };
-          let mut frac = *$rp + 1;
-          // The loop below produces digits from most-significant to least, but
-          // the containing loop works from least signficant limb up, so move
-          // the first position for the output for this limb. Since we know
-          // there is at least one more limb to process after this one, it's
-          // safe to output all digits that may be produced.
-          $s = $s.offset(-(digits_per_limb as isize));
-          let mut i = digits_per_limb;
-          loop {
-            // Multiply the fraction from divrem by the base, the overflow
-            // amount is the next digit we want
-            let (digit, f) = frac.mul_hilo($base);
-            frac = f;
-            *$s = digit.0 as u8;
-            $s = $s.offset(1);
+      nn -= if *rp.offset(nn as isize) == 0 { 1 } else { 0 };
+      let mut frac = *rp + 1;
+      // The loop below produces digits from most-significant to least, but
+      // the containing loop works from least signficant limb up, so move
+      // the first position for the output for this limb. Since we know
+      // there is at least one more limb to process after this one, it's
+      // safe to output all digits that may be produced.
+      s = s.offset(-(*digits_per_limb as isize));
+      let mut i = *digits_per_limb;
+      while i != 0 {
+        // Multiply the fraction from divrem by the base, the overflow
+        // amount is the next digit we want
+        let (digit, f) = frac.mul_hilo(base);
+        frac = f;
+        *s = digit.0 as u8;
+        s = s.offset(1);
 
-            $sz += 1;
-
-            i -= 1;
-            if i == 0 { break; }
+        sz += 1;
+        if let Some(len) = len {
+          if len <= sz {
+            break 'outer;
           }
-
-          $s = $s.offset(-(digits_per_limb as isize));
         }
 
-        // Last limb, use normal conversion for this one so we
-        // don't overshoot the number of digits
-        let mut ul = *$rp.offset(1);
-        while ul != 0 {
-          let (q, r) = div_unnorm(ul, base);
-          $s = $s.offset(-1);
-          *$s = r.0 as u8;
-          ul = q;
+        i -= 1;
+      }
 
-          $sz += 1;
+      s = s.offset(-(*digits_per_limb as isize));
+    }
+
+    // Last limb, use normal conversion for this one so we
+    // don't overshoot the number of digits
+    let mut ul = *rp.offset(1);
+    while ul != 0 {
+      let (q, r) = div_unnorm(ul, base);
+      s = s.offset(-1);
+      *s = r.0 as u8;
+      ul = q;
+
+      sz += 1;
+      if let Some(len) = len {
+        if len <= sz {
+          break 'outer;
         }
       }
-    )
-  );
-
-  // Specialise on the base-10 conversion routine. The other common base, 16, is handled
-  // by the power-of-two case in to_base. This allows the compiler to unroll the inner
-  // loop in the conversion, which is a sigificant speed increase.
-  if base == 10 {
-    base_impl!(Limb(10), s, rp, sz, nn);
-  } else {
-    base_impl!(base, s, rp, sz, nn);
-  }
-
-  let mut l = sz;
-
-  // Output any leading zeros we may want
-  while l < len {
-    out_byte(0);
-    len -= 1;
+    }
   }
 
   // Copy the temporary buffer into the output string
+  let mut l = sz;
   while l != 0 {
     out_byte(*s);
     s = s.offset(1);
     l -= 1;
+  }
+
+  let mut l = sz;
+  // Output any padding zeros we may want
+  if let Some(len) = len {
+    while l < len {
+      out_byte(0);
+      l += 1;
+    }
   }
 }
 
