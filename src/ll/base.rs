@@ -105,17 +105,33 @@ pub fn base_digits_to_len(num: usize, base: u32) -> usize {
  * The values in `out` are the raw values of the base. Conversion for output should be done as a second
  * step.
 */
-pub unsafe fn to_base<F: FnMut(u8)>(base: u32, np: Limbs, nn: i32, mut out_byte: F) {
+pub unsafe fn to_base<F: FnMut(u8)>(
+  base: u32,
+  np: Limbs,
+  nn: i32,
+  mut out_byte: F,
+  len: Option<u32>
+) {
   debug_assert!(nn >= 0);
   debug_assert!(base < BASES.len() as u32);
   debug_assert!(base >= 2);
   assume(base < BASES.len() as u32);
   assume(base >= 2);
 
+  let mut count = 0;
+
   if nn <= 0 {
     out_byte(0);
+    count += 1;
+    if let Some(len) = len {
+      while count < len {
+        out_byte(0);
+        count += 1;
+      }
+    }
     return;
   }
+
   // Fast path for powers-of-two, since each limb is already in base B^m format
   if base.is_power_of_two() {
     let bits_per_digit = BASES.get_unchecked(base as usize).big_base.0 as usize;
@@ -139,6 +155,13 @@ pub unsafe fn to_base<F: FnMut(u8)>(base: u32, np: Limbs, nn: i32, mut out_byte:
       while bit_pos >= 0 {
         let b = ((n1 >> (bit_pos as usize)) & ((Limb(1) << bits_per_digit) - 1)).0 as u8;
         out_byte(b);
+        count += 1;
+        if let Some(len) = len {
+          if len <= count {
+            println!("{}, {}", count, len);
+            return;
+          }
+        }
         bit_pos -= bits_per_digit as isize;
       }
       i -= 1;
@@ -157,6 +180,20 @@ pub unsafe fn to_base<F: FnMut(u8)>(base: u32, np: Limbs, nn: i32, mut out_byte:
       //          ^---^         Bits for next digit
       let b = (n0 | (n1 >> (bit_pos as usize))).0 as u8;
       out_byte(b);
+      count += 1;
+      if let Some(len) = len {
+        if len <= count {
+          println!("{}, {}", count, len);
+          return;
+        }
+      }
+    }
+
+    if let Some(len) = len {
+      while count < len {
+        out_byte(0);
+        count += 1;
+      }
     }
     return;
   }
@@ -213,6 +250,116 @@ pub unsafe fn to_base_le<F: FnMut(u8)>(
       min_len -= 1;
     }
     return;
+  }
+}
+
+pub unsafe fn num_digits(np: Limbs, nn: i32, base: u32) -> usize {
+  debug_assert!(nn >= 0);
+  debug_assert!(base < BASES.len() as u32);
+  debug_assert!(base >= 2);
+  assume(base < BASES.len() as u32);
+  assume(base >= 2);
+
+  if nn <= 0 {
+    return 0;
+  }
+
+  num_digits_impl(0, base, np, nn);
+}
+
+unsafe fn num_digits_impl(mut len: u32, base: u32, np: Limbs, mut nn: i32) {
+  debug_assert!(base > 2);
+
+  let buf_len = num_base_digits(np, nn, base);
+  let mut buf: Vec<u8> = vec![0; buf_len];
+  let mut r: Vec<Limb> = vec![Limb(0); (nn + 1) as usize];
+  let rp = LimbsMut::new(&mut r[0], 0, r.len() as i32);
+
+  ll::copy_incr(np, rp.offset(1), nn);
+
+  let mut sz = 0;
+
+  let s: *mut u8 = &mut buf[0];
+  let mut s = s.offset(buf_len as isize);
+
+  let base = Limb(base as ll::limb::BaseInt);
+
+  macro_rules! base_impl (
+    ($base:expr, $s:expr, $rp:expr, $sz:ident, $nn:ident) => (
+      {
+        let digits_per_limb = BASES.get_unchecked($base.0 as usize).digits_per_limb;
+        let big_base = BASES.get_unchecked($base.0 as usize).big_base;
+
+        // Process limbs from least-significant to most, until there is only one
+        // limb left
+        while $nn > 1 {
+          // Divide rp by the big_base, with a single fractional limb produced.
+          // The fractional limb is approximately 1/remainder
+          ll::divrem_1($rp, 1, $rp.offset(1).as_const(), $nn, big_base);
+
+          $nn -= if *$rp.offset($nn as isize) == 0 { 1 } else { 0 };
+          let mut frac = *$rp + 1;
+          // The loop below produces digits from most-significant to least, but
+          // the containing loop works from least signficant limb up, so move
+          // the first position for the output for this limb. Since we know
+          // there is at least one more limb to process after this one, it's
+          // safe to output all digits that may be produced.
+          $s = $s.offset(-(digits_per_limb as isize));
+          let mut i = digits_per_limb;
+          loop {
+            // Multiply the fraction from divrem by the base, the overflow
+            // amount is the next digit we want
+            let (digit, f) = frac.mul_hilo($base);
+            frac = f;
+            *$s = digit.0 as u8;
+            $s = $s.offset(1);
+
+            $sz += 1;
+
+            i -= 1;
+            if i == 0 { break; }
+          }
+
+          $s = $s.offset(-(digits_per_limb as isize));
+        }
+
+        // Last limb, use normal conversion for this one so we
+        // don't overshoot the number of digits
+        let mut ul = *$rp.offset(1);
+        while ul != 0 {
+          let (q, r) = div_unnorm(ul, base);
+          $s = $s.offset(-1);
+          *$s = r.0 as u8;
+          ul = q;
+
+          $sz += 1;
+        }
+      }
+    )
+  );
+
+  // Specialise on the base-10 conversion routine. The other common base, 16, is handled
+  // by the power-of-two case in to_base. This allows the compiler to unroll the inner
+  // loop in the conversion, which is a sigificant speed increase.
+  if base == 10 {
+    base_impl!(Limb(10), s, rp, sz, nn);
+  } else {
+    base_impl!(base, s, rp, sz, nn);
+  }
+
+  let mut l = sz;
+
+  // Output any leading zeros we may want
+  while l < len {
+    out_byte(0);
+    len -= 1;
+  }
+
+  // Copy the temporary buffer into the output string
+  while l != 0 {
+    out_byte(*s);
+    s = s.offset(1);
+    l -= 1;
   }
 }
 

@@ -308,6 +308,28 @@ impl Int {
     unsafe { String::from_utf8_unchecked(buf) }
   }
 
+  pub fn to_str_radix_len(&self, base: u8, upper: bool, len: u32) -> String {
+    if self.size == 0 {
+      return "0".to_string();
+    }
+
+    if base < 2 || base > 36 {
+      panic!("Invalid base: {}", base);
+    }
+
+    let mut num_digits = len as usize;
+
+    if self.sign() == -1 {
+      num_digits += 1;
+    }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(num_digits);
+
+    self.write_radix_len(&mut buf, base, upper, len).unwrap();
+
+    unsafe { String::from_utf8_unchecked(buf) }
+  }
+
   pub fn write_bytes_le(&self, w: &mut [u8], len: usize) -> io::Result<()> {
     debug_assert!(self.well_formed());
 
@@ -329,6 +351,45 @@ impl Int {
     Ok(())
   }
 
+  pub fn write_radix_len<W: io::Write>(
+    &self,
+    w: &mut W,
+    base: u8,
+    upper: bool,
+    len: u32
+  ) -> io::Result<()> {
+    debug_assert!(self.well_formed());
+
+    if self.sign() == -1 {
+      w.write_all(b"-")?;
+    }
+
+    let letter = if upper { b'A' } else { b'a' };
+    let size = self.abs_size();
+
+    unsafe {
+      ll::base::to_base(
+        base as u32,
+        self.limbs(),
+        size,
+        |b| {
+          if b < 10 {
+            w.write_all(&[b + b'0']).unwrap();
+          } else {
+            w.write_all(&[(b - 10) + letter]).unwrap();
+          }
+        },
+        Some(len)
+      );
+    }
+
+    Ok(())
+  }
+
+  pub fn num_digits(&self, base: u32) -> usize {
+    unsafe { ll::base::num_digits(self.limbs(), self.abs_size(), base as u32) }
+  }
+
   /// Similar to `to_str_radix`, writing to something that implements `io::Write` instead.
   pub fn write_radix<W: io::Write>(&self, w: &mut W, base: u8, upper: bool) -> io::Result<()> {
     debug_assert!(self.well_formed());
@@ -341,13 +402,19 @@ impl Int {
     let size = self.abs_size();
 
     unsafe {
-      ll::base::to_base(base as u32, self.limbs(), size, |b| {
-        if b < 10 {
-          w.write_all(&[b + b'0']).unwrap();
-        } else {
-          w.write_all(&[(b - 10) + letter]).unwrap();
-        }
-      });
+      ll::base::to_base(
+        base as u32,
+        self.limbs(),
+        size,
+        |b| {
+          if b < 10 {
+            w.write_all(&[b + b'0']).unwrap();
+          } else {
+            w.write_all(&[(b - 10) + letter]).unwrap();
+          }
+        },
+        None
+      );
     }
 
     Ok(())
@@ -3984,6 +4051,7 @@ mod test {
       ("0", 15, 1),
       ("0", 58, 1),
       ("49172", 10, 5),
+      ("4917255", 10, 7),
       ("49172", 57, 3),  // [15, 7, 38], 38 + 7*57 + 15*57**2 = 49172
       ("185192", 57, 3), // [56, 56, 56], 56 + 56*57 + 56*57**2 = 185192
       ("185193", 57, 4), // [1, 0, 0, 0], 1*57**3 = 185193
