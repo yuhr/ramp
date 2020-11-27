@@ -121,6 +121,7 @@ pub unsafe fn to_base<F: FnMut(u8)>(
   let mut count = 0;
 
   if nn <= 0 {
+    // Emit at least one zero
     out_byte(0);
     count += 1;
     if let Some(len) = len {
@@ -157,7 +158,7 @@ pub unsafe fn to_base<F: FnMut(u8)>(
         out_byte(b);
         count += 1;
         if let Some(len) = len {
-          if len <= count {
+          if len == count {
             println!("{}, {}", count, len);
             return;
           }
@@ -182,7 +183,7 @@ pub unsafe fn to_base<F: FnMut(u8)>(
       out_byte(b);
       count += 1;
       if let Some(len) = len {
-        if len <= count {
+        if len == count {
           println!("{}, {}", count, len);
           return;
         }
@@ -195,24 +196,22 @@ pub unsafe fn to_base<F: FnMut(u8)>(
         count += 1;
       }
     }
-    return;
+  } else {
+    // TODO: Use divide-and-conquer for large numbers
+    to_base_impl(len, base, np, nn, out_byte);
   }
-  // TODO: Use divide-and-conquer for large numbers
-  to_base_impl(len, base, np, nn, out_byte);
 }
 
 pub unsafe fn to_bytes_le<F: FnMut(u8)>(np: Limbs, nn: i32, mut out_byte: F, len: Option<usize>) {
   let bits_per_digit = BASES.get_unchecked(256).big_base.0 as usize;
-  let mut n1 = *np.offset(0isize);
-  let mut bit_pos = 0usize;
-  let mut i = 0;
   let mut count = 0;
 
   let mask_one_digit = (Limb(1) << bits_per_digit) - 1;
 
   // Convert each limb by shifting and masking to get the value for each output digit
-  loop {
-    while bit_pos < Limb::BITS {
+  for i in 0..nn {
+    let n1 = *np.offset(i as isize);
+    for bit_pos in (0..Limb::BITS).step_by(bits_per_digit) {
       let b = ((n1 >> (bit_pos as usize)) & mask_one_digit).0 as u8;
       out_byte(b);
       count += 1;
@@ -221,14 +220,7 @@ pub unsafe fn to_bytes_le<F: FnMut(u8)>(np: Limbs, nn: i32, mut out_byte: F, len
           return;
         }
       }
-      bit_pos += bits_per_digit;
     }
-    i += 1;
-    if nn <= i {
-      break;
-    }
-    n1 = *np.offset(i as isize);
-    bit_pos = 0usize;
   }
   if let Some(len) = len {
     while count < len {
@@ -254,12 +246,11 @@ unsafe fn to_base_impl<F: FnMut(u8)>(
 
   ll::copy_incr(np, rp.offset(1), nn);
 
-  let mut sz = 0;
-
   let s: *mut u8 = &mut buf[0];
-  let mut s = s.offset(buf_len as isize);
+  let mut sp = s.offset(buf_len as isize);
 
   let base = Limb(base as ll::limb::BaseInt);
+  let mut count = 0;
 
   'outer: {
     let Base {
@@ -281,27 +272,24 @@ unsafe fn to_base_impl<F: FnMut(u8)>(
       // the first position for the output for this limb. Since we know
       // there is at least one more limb to process after this one, it's
       // safe to output all digits that may be produced.
-      s = s.offset(-(*digits_per_limb as isize));
-      let mut i = *digits_per_limb;
-      while i != 0 {
+      sp = sp.offset(-(*digits_per_limb as isize));
+      for _ in 0..*digits_per_limb {
         // Multiply the fraction from divrem by the base, the overflow
         // amount is the next digit we want
         let (digit, f) = frac.mul_hilo(base);
         frac = f;
-        *s = digit.0 as u8;
-        s = s.offset(1);
+        *sp = digit.0 as u8;
+        sp = sp.offset(1);
 
-        sz += 1;
-        if let Some(len) = len {
-          if len <= sz {
-            break 'outer;
-          }
-        }
-
-        i -= 1;
+        count += 1;
+        // if let Some(len) = len {
+        //   if count == len {
+        //     break 'outer;
+        //   }
+        // }
       }
 
-      s = s.offset(-(*digits_per_limb as isize));
+      sp = sp.offset(-(*digits_per_limb as isize));
     }
 
     // Last limb, use normal conversion for this one so we
@@ -309,33 +297,35 @@ unsafe fn to_base_impl<F: FnMut(u8)>(
     let mut ul = *rp.offset(1);
     while ul != 0 {
       let (q, r) = div_unnorm(ul, base);
-      s = s.offset(-1);
-      *s = r.0 as u8;
+      sp = sp.offset(-1);
+      *sp = r.0 as u8;
       ul = q;
 
-      sz += 1;
-      if let Some(len) = len {
-        if len <= sz {
-          break 'outer;
-        }
-      }
+      count += 1;
+      // if let Some(len) = len {
+      //   if count == len {
+      //     break 'outer;
+      //   }
+      // }
     }
   }
 
   // Copy the temporary buffer into the output string
-  let mut l = sz;
-  while l != 0 {
-    out_byte(*s);
-    s = s.offset(1);
-    l -= 1;
+  sp = s.offset(0);
+  for i in 0..count {
+    if let Some(len) = len {
+      if i == len {
+        break;
+      }
+    }
+    out_byte(*sp);
+    sp = sp.offset(1);
   }
 
-  let mut l = sz;
   // Output any padding zeros we may want
   if let Some(len) = len {
-    while l < len {
+    for _ in count..len {
       out_byte(0);
-      l += 1;
     }
   }
 }
